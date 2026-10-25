@@ -1,0 +1,73 @@
+# Vigia da SMI Academy: a cada 5 minutos, confere se o site responde e avisa no
+# celular do Esley (ntfy, o mesmo app do aviso de venda) quando cai e quando volta.
+# Roda aqui no GitHub, fora do servidor do site: avisa mesmo quando ele cai inteiro.
+# O canal do ntfy fica no segredo NTFY_TOPICO do repositório, nunca no código.
+name: vigia
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+    inputs:
+      teste:
+        description: "Só manda um aviso de teste ao celular (não confere o site nem muda o estado)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  conferir:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # O estado da última conferência (no ar / fora) passa de uma execução para a
+      # outra pelo cache: só avisa quando muda, não a cada 5 minutos.
+      - name: Estado anterior
+        uses: actions/cache/restore@v4
+        with:
+          path: estado.txt
+          key: estado-${{ github.run_id }}
+          restore-keys: estado-
+
+      - name: Aviso de teste
+        if: ${{ inputs.teste }}
+        env:
+          NTFY_TOPICO: ${{ secrets.NTFY_TOPICO }}
+        run: |
+          curl -s -H "Title: Teste do vigia da SMI" -H "Tags: test_tube"             -d "Este é só um teste: quando o site cair, o aviso chega assim. Nada está fora do ar."             "https://ntfy.sh/$NTFY_TOPICO" > /dev/null
+
+      - name: Conferir o site
+        if: ${{ !inputs.teste }}
+        env:
+          NTFY_TOPICO: ${{ secrets.NTFY_TOPICO }}
+        run: |
+          antes=$(cat estado.txt 2>/dev/null || echo "no-ar")
+          agora="fora"
+          for tentativa in 1 2 3; do
+            codigo=$(curl -s -o /dev/null -w "%{http_code}" --max-time 20 https://academy.treinamentosmi.com.br/termos || echo 000)
+            if [ "$codigo" = "200" ]; then agora="no-ar"; break; fi
+            sleep 20
+          done
+          echo "antes=$antes agora=$agora (último código $codigo)"
+          hora=$(TZ=America/Sao_Paulo date +%H:%M)
+          if [ "$agora" != "$antes" ] && [ -n "$NTFY_TOPICO" ]; then
+            if [ "$agora" = "fora" ]; then
+              curl -s -H "Title: Site da SMI fora do ar" -H "Priority: urgent" -H "Tags: rotating_light" \
+                -d "academy.treinamentosmi.com.br não responde desde $hora. Plano B: página reserva reserva.treinamentosmi.com.br, avisar as vendedoras e pausar os anúncios." \
+                "https://ntfy.sh/$NTFY_TOPICO" > /dev/null
+            else
+              curl -s -H "Title: Site da SMI de volta" -H "Tags: white_check_mark" \
+                -d "academy.treinamentosmi.com.br voltou às $hora. Pode retomar os anúncios." \
+                "https://ntfy.sh/$NTFY_TOPICO" > /dev/null
+            fi
+          fi
+          echo "$agora" > estado.txt
+
+      - name: Guardar o estado
+        if: ${{ !inputs.teste }}
+        uses: actions/cache/save@v4
+        with:
+          path: estado.txt
+          key: estado-${{ github.run_id }}
